@@ -1,0 +1,7 @@
+{
+  "venvPath": "fast-api-cloud",
+  "venv": ".venv",
+  "extraPaths": [
+    "."
+  ]
+}

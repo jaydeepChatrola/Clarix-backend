@@ -1,0 +1,6 @@
+{
+  "python.defaultInterpreterPath": "fast-api-cloud/.venv/bin/python",
+  "python.analysis.extraPaths": [
+    "."
+  ]
+}
