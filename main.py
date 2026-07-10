@@ -187,11 +187,15 @@ async def supabase_webhook(request: Request):
     We download the file, extract text, chunk it, embed it, store in pgvector.
     """
     payload = await request.json()
+
+    if not payload:
+        return {"status": "error", "message": "Empty payload"}
+
     type_   = payload.get("type")
     if type_ == "DELETE":
-        record = payload.get("old_record", {})
+        record = payload.get("old_record") or {}
     else:
-        record = payload.get("record", {})
+        record = payload.get("record") or {}
 
     file_id = record.get("id")
     bot_id  = record.get("bot_id")
