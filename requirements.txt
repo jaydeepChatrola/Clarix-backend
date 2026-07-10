@@ -1,6 +1,6 @@
-fastapi
-uvicorn
+fastapi[standard]
 openai
+google-genai
 supabase
 pypdf
 python-docx

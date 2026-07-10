@@ -6,7 +6,7 @@ import time
 # pyrefly: ignore [missing-import]
 import httpx
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 # pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
 # pyrefly: ignore [missing-import]
@@ -34,7 +34,7 @@ genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 openai_chat = OpenAI(api_key=os.getenv("OPENROUTER_API_KEY"), base_url=os.getenv("OPENROUTER_BASE_URL"))
 supabase: Client = create_client(
     os.getenv("SUPABASE_URL"),
-    os.getenv("SUPABASE_SERVICE_KEY")  # service key — not anon key!
+    os.getenv("SUPABASE_KEY")  # service key — not anon key!
 )
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
@@ -46,7 +46,6 @@ app.add_middleware(
 )
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-EMBED_MODEL   = os.getenv("EMB_MODEL")
 CHAT_MODEL    = os.getenv("OPENAI_MODEL")
 CHUNK_SIZE    = 500   # characters per chunk
 CHUNK_OVERLAP = 50    # overlap between chunks
@@ -86,7 +85,7 @@ def chunk_text(text: str) -> list[str]:
 
 
 def extract_text(file_bytes: bytes, file_name: str) -> str:
-    """Extract raw text from PDF, DOCX, TXT, or CSV."""
+    """Extract raw text from PDF, DOCX, TXT, JSON, or CSV."""
     ext = file_name.split(".")[-1].lower()
 
     if ext == "pdf":
@@ -104,6 +103,24 @@ def extract_text(file_bytes: bytes, file_name: str) -> str:
         text = file_bytes.decode("utf-8", errors="ignore")
         reader = csv.reader(io.StringIO(text))
         return "\n".join(", ".join(row) for row in reader)
+
+    elif ext == "json":
+        text = file_bytes.decode("utf-8", errors="ignore")
+        data = json.loads(text)
+        lines: list[str] = []
+
+        def flatten(obj, prefix: str = ""):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    flatten(v, f"{prefix}{k}: " if not prefix else f"{prefix}{k}: ")
+            elif isinstance(obj, list):
+                for i, item in enumerate(obj):
+                    flatten(item, f"{prefix}[{i}]: ")
+            else:
+                lines.append(f"{prefix}{obj}")
+
+        flatten(data)
+        return "\n".join(lines)
 
     else:
         raise ValueError(f"Unsupported file type: {ext}")
@@ -155,48 +172,48 @@ def update_file_status(file_id: str, status: str, error: str = ""):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENDPOINT 2 — WEBHOOK (Supabase triggers this on file insert)
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.post("/webhook/knowledge-file")
-async def process_knowledge_file(request: Request):
+#@app.post("/webhook/knowledge-file")
+@app.post("/webhooks/supabase")
+async def supabase_webhook(request: Request):
     """
     Supabase calls this when a new row is inserted in knowledge_files.
     We download the file, extract text, chunk it, embed it, store in pgvector.
     """
     payload = await request.json()
-    print("------")
-    print(payload)
-    print("------")
+    type_   = payload.get("type")
+    if type_ == "DELETE":
+        record = payload.get("old_record", {})
+    else:
+        record = payload.get("record", {})
 
-
-    # Supabase webhook sends the new row under 'record'
-    record = payload.get("record", {})
     file_id = record.get("id")
     bot_id  = record.get("bot_id")
-    name    = record.get("name")
-    type_   = record.get("type")
+    file_name = record.get("name")
+    file_type = record.get("type")
 
-    if not all([file_id, bot_id, name]):
+    if not all([file_id, bot_id, file_name]):
         raise HTTPException(status_code=400, detail="Missing required fields")
 
     # Skip URL type — handled separately
-    if type_ == "url":
-        await process_url(file_id=file_id, bot_id=bot_id, url=name)
+    if file_type == "url":
+        await process_url(file_id=file_id, bot_id=bot_id, url=file_name)
         return {"status": "processing url"}
 
     try:
         # 1. Download file from Supabase Storage
-        path = f"{bot_id}/{name}"
+        path = f"{bot_id}/{file_name}"
         response = supabase.storage.from_("knowledge").download(path)
         file_bytes = response  # returns bytes
 
         # 2. Extract text
-        text = extract_text(file_bytes, name)
+        text = extract_text(file_bytes, file_name)
         if not text.strip():
             update_file_status(file_id, "failed", "Could not extract text from file")
             return {"status": "failed", "reason": "empty text"}
@@ -284,13 +301,13 @@ async def chat(req: ChatRequest):
 
         # 3. Build system prompt
         system_prompt = """You are a helpful AI assistant. 
-Answer the user's question using ONLY the context provided below.
-If the context does not contain enough information to answer, 
-say "I don't have information about that. Please contact support."
-Be concise, friendly, and accurate.
+        Answer the user's question using ONLY the context provided below.
+        If the context does not contain enough information to answer, 
+        say "I don't have information about that. Please contact support."
+        Be concise, friendly, and accurate.
 
-Context:
-""" + context
+        Context:
+        """ + context
 
         # 4. Call Nvidia Model
         response = openai_chat.chat.completions.create(
